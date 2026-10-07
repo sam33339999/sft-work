@@ -1,0 +1,161 @@
+{# Define the macros for XML conversion #}
+{%- macro render_item_list(item_list, tag_name='required') -%}
+  {%- if item_list is defined and item_list is iterable and item_list | length > 0 -%}
+    <{{ tag_name }}>[{{- item_list | join(", ") -}}]</{{ tag_name }}>
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro render_extra_keys(json_dict, handled_keys) -%}
+  {%- if json_dict is mapping -%}
+    {%- for json_key in json_dict if json_key not in handled_keys -%}
+      <{{ json_key }}>{{ json_dict[json_key] }}</{{ json_key }}>
+    {%- endfor -%}
+  {%- endif -%}
+{%- endmacro -%}
+
+
+{%- set image_count = namespace(value=0) %}
+{%- set video_count = namespace(value=0) %}
+{%- set add_vision_id = add_vision_id if add_vision_id is defined else true %}
+
+{# Set Instruct mode here #}
+
+{%- macro render_content(content, do_vision_count, is_system_content=false) %}
+    {%- if content is string %}
+        {{- content }}
+    {%- elif content is iterable and content is not mapping %}
+        {%- for item in content %}
+            {%- if 'image' in item or 'image_url' in item or (item is mapping and item.get('type') == 'image') %}
+                {%- if is_system_content %}
+                    {{- raise_exception('System message cannot contain images.') }}
+                {%- endif %}
+                {%- if do_vision_count %}
+                    {%- set image_count.value = image_count.value + 1 %}
+                {%- endif %}
+                {%- if add_vision_id %}
+                    {{- 'Picture ' ~ image_count.value ~ ': ' }}
+                {%- endif %}
+                {{- '<|vision_start|><|image_pad|><|vision_end|>' }}
+            {%- elif 'video' in item or (item is mapping and item.get('type') == 'video') %}
+                {%- if is_system_content %}
+                    {{- raise_exception('System message cannot contain videos.') }}
+                {%- endif %}
+                {%- if do_vision_count %}
+                    {%- set video_count.value = video_count.value + 1 %}
+                {%- endif %}
+                {%- if add_vision_id %}
+                    {{- 'Video ' ~ video_count.value ~ ': ' }}
+                {%- endif %}
+                {{- '<|vision_start|><|video_pad|><|vision_end|>' }}
+            {%- elif item is mapping and 'text' in item %}
+                {{- item.text }}
+            {%- else %}
+                {{- raise_exception('Unexpected item type in content.') }}
+            {%- endif %}
+        {%- endfor %}
+    {%- elif content is none or content is undefined %}
+        {{- '' }}
+    {%- else %}
+        {{- raise_exception('Unexpected content type.') }}
+    {%- endif %}
+{%- endmacro %}
+
+{%- if not messages %}
+    {{- raise_exception('No messages provided.') }}
+{%- endif %}
+
+{# Flag to prevent double-rendering system prompt #}
+{%- set ns = namespace(system_rendered=false) %}
+
+{%- if tools and tools is iterable and tools is not mapping %}
+
+    {{- '<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>' -}}
+    {%- for tool in tools -%}
+        {%- set function = tool.function -%}
+        {{- "\n<tool>\n<name>" + function.name + "</name>\n<description>" + function.description + "</description>" -}}
+        {%- if function.parameters and function.parameters.properties -%}
+            {%- for param_name, param_details in function.parameters.properties.items() -%}
+                {{- "\n<parameter>\n<name>" + param_name + "</name>\n<type>" + param_details.type + "</type>\n<description>" + (param_details.description | default('')) + "</description>" -}}
+                {{- render_item_list(function.parameters.required) -}}
+                {{- render_extra_keys(param_details, ['type', 'description']) -}}
+                {{- "\n</parameter>" -}}
+            {%- endfor -%}
+        {%- endif -%}
+        {{- "\n</tool>" -}}
+    {%- endfor -%}
+
+    {{- '\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>' }}
+    
+    {%- if messages[0].role == 'system' %}
+        {%- set content = render_content(messages[0].content, false, true)|trim %}
+        {%- if content %}
+            {{- '\n\n' + content }}
+        {%- endif %}
+        {%- set ns.system_rendered = true %}
+    {%- endif %}
+    {{- '<|im_end|>\n' }}
+{%- else %}
+    {%- if messages[0].role == 'system' %}
+        {%- set content = render_content(messages[0].content, false, true)|trim %}
+        {{- '<|im_start|>system\n' + content + '<|im_end|>\n' }}
+        {%- set ns.system_rendered = true %}
+    {%- endif %}
+{%- endif %}
+
+{# Main Message Loop #}
+{%- for message in messages %}
+    {%- if message.role == "system" and ns.system_rendered and loop.first %}
+        {%- continue %}
+    {%- endif %}
+
+    {%- set content = render_content(message.content, true)|trim %}
+    
+    {%- if message.role == "system" %}
+        {{- '<|im_start|>system\n' + content + '<|im_end|>\n' }}
+    {%- elif message.role == "user" %}
+        {{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>\n' }}
+    {%- elif message.role == "assistant" %}
+        {%- set reasoning_content = '' %}
+        {%- if message.reasoning_content is defined and message.reasoning_content is string %}
+            {%- set reasoning_content = message.reasoning_content | trim %}
+        {%- elif '<think>' in content and '</think>' in content %}
+            {%- set reasoning_content = content.split('</think>')[0].split('<think>')[-1] | trim %}
+            {%- set content = content.split('</think>')[-1] | trim %}
+        {%- endif %}
+
+        {{- '<|im_start|>' + message.role + '\n' }}
+        
+        {%- if reasoning_content %}
+            {{- '<think>\n' + reasoning_content + '\n</think>\n\n' }}
+        {%- endif %}
+        
+        {{- content }}
+
+        {# Tool call formatting #}
+        {%- if message.tool_calls %}
+            {%- for tool_call in message.tool_calls %}
+                {%- set tc = tool_call.function if tool_call.function is defined else tool_call %}
+                {%- if loop.first and content %}{{- '\n\n' }}{%- elif not loop.first %}{{- '\n' }}{%- endif %}
+                {{- '<tool_call>\n<function=' + tc.name + '>\n' }}
+                {%- for args_name, args_value in tc.arguments|items %}
+                    {{- '<parameter=' + args_name + '>\n' }}
+                    {{- (args_value | tojson | safe if args_value is mapping or args_value is sequence else args_value | string) + '\n</parameter>\n' }}
+                {%- endfor %}
+                {{- '</function>\n</tool_call>' }}
+            {%- endfor %}
+        {%- endif %}
+        {{- '<|im_end|>\n' }}
+    {%- elif message.role == "tool" %}
+        {%- if loop.previtem and loop.previtem.role != "tool" %}{{- '<|im_start|>user' }}{%- endif %}
+        {{- '\n<tool_response>\n' + content + '\n</tool_response>' }}
+        {%- if loop.last or (loop.nextitem and loop.nextitem.role != "tool") %}{{- '<|im_end|>\n' }}{%- endif %}
+    {%- endif %}
+{%- endfor %}
+
+{# Final Generation Prompt #}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+    {%- if enable_thinking is defined and enable_thinking is true %}
+        {{- '<think>\n' }}
+    {%- endif %}
+{%- endif %}

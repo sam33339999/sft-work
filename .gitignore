@@ -1,0 +1,26 @@
+# Byte-compiled / optimized / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large Model Weights (Safetensors / Checkpoints)
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+
+# Base Model directory (External weights)
+Qwen3.5-9B-Claude-4.6-Opus-Deckard-V4.2-Uncensored-Heretic-Thinking/
+
+# Training intermediate checkpoints
+output_lora/checkpoint-*/
+
+# Server logs and process IDs
+logs/
+*.log
+*.pid
+
+# Temporary & Editor files
+.DS_Store
+.ipynb_checkpoints/
